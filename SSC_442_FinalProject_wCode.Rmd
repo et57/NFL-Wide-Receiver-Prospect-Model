@@ -1,0 +1,526 @@
+---
+title: "Final Project - Which NFL Wide Receiver Prospects Are Most Likely to Succeed?"
+author: "Ethan Truelove, Andy Filips, Ryan MccQuillen, Marsello Gashaj"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+---
+
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction 
+
+For our final project, we chose to evaluate incoming rookie wide receivers in the NFL draft. We found a spreadsheet on twitter containing every wide receiver prospect from 2003 to 2021. This spreadsheet had every college statistic imaginable for each prospect as well as their athletic testing and measurements. Using all this data, we built a model to predict each wide receivers probability of being successful in the NFL. As a proxy for success we used fantasy football points scored per game. If you are unfamiliar with fantasy football, each reception is worth 1 point, each receiving yard is worth 0.1 point, and each touchdown reception is worth 6 points. The replacement level wide receiver in fantasy scores roughly 10 fantasy points per game, so we will use 10 points per game as our threshold for NFL success at wide receiver. Our data set for past players utilizes all wide receivers from the 2003 to 2019 class. We ignored wide receivers drafted in the 2020 draft because they have not all had a chance to breakout in the NFL yet.
+
+
+
+```{r, warning=FALSE, message=FALSE}
+library(tidymodels)
+library(readr)
+library(glmnet)
+library(ranger)
+library(vip)
+library(tidyverse)
+library(caret)
+library(imputeTS)
+library(janitor)
+library(tidyr)
+library(rvest)
+library(xml2)
+library(tidyverse)
+library(themis)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+fb <- readr::read_csv("past_players.csv") %>% 
+  mutate_if(is.character, as.factor)
+
+rookies <- readr::read_csv("WR-Rookies.csv") %>% 
+  mutate_if(is.character, as.factor)
+
+
+null_cols <- colSums(is.na(fb))
+
+
+dim(fb)
+dim(rookies)
+```
+
+There was a tremendous amount of missing values in the data set. It was hard to decide which columns should be left empty and which should be imputed.
+
+```{r}
+null_cols <- colSums(is.na(fb))
+null_cols[null_cols >350 & null_cols < 375]
+```
+We went through the entire data set to determine if a missing field in a column was appropriate (no data for yards gained at age 23 because the player was drafted at age 21) or if it should be imputed ( 40 yard dash missing from their combine testing). We chose KNN clustering as our method of imputation. In this context, this makes sense. If a player is missing a vertical, but has a similar height, weight, and 40 time to other players that do have verticals, it makes sense that the player with the missing jump may also have a similar vertical jump that we could use from the other player's rows.
+
+
+```{r}
+ffb <- fb %>% 
+  select('Player','DraftYear','School', 'Conference', 'DR', 'DP', 'DraftAge',  'BreakoutAge_WRBOA_twentypercent','BreakoutAge_WRBOA_thirtypercent','TotalCareer_REC', 'GamesPlayed_18','GamesPlayed_19','GamesPlayed_20', 'GamesPlayed_21', 'GamesPlayed_22',  "RushATTs_18" ,                         
+ "RushATTs_19",                           "RushATTs_20" ,                         "RushATTs_21",                          
+  "RushATTs_22"  ,                         "RushATTs_23"  ,                         "RushYards_18" ,                        
+  "RushYards_19" ,                         "RushYards_20" ,                         "RushYards_21",                         
+  "RushYards_22"  ,                        "RushYards_23"  ,                        "RushTDs_18"   ,                        
+  "RushTDs_19"     ,                       "RushTDs_20"     ,                       "RushTDs_21"    ,                       
+  "RushTDs_22"      ,                      "RushTDs_23"      ,                      "MSRushATTs_18"  ,                      
+  "MSRushATTs_19"    ,                     "MSRushATTs_20"    ,                     "MSRushATTs_21"   ,                     
+  "MSRushATTs_22"     ,                    "MSRushATTs_23"     ,                    "MSRushYards_18"   ,                    
+  "MSRushYards_19"     ,                   "MSRushYards_20"     ,                   "MSRushYards_21"    ,                   
+  "MSRushYards_22"      ,                  "MSRushYards_23"      ,                  "MSRushTDs_18"       ,                  
+  "MSRushTDs_19"         ,                 "MSRushTDs_20"         ,                 "MSRushTDs_21"        ,                 
+  "MSRushTDs_22"          ,                "MSRushTDs_23"          ,                "CombinedRUSHMS_18"    ,                
+  "CombinedRUSHMS_19"      ,               "CombinedRUSHMS_20"      ,               "CombinedRUSHMS_21"     ,               
+  "CombinedRUSHMS_22"       ,              "CombinedRUSHMS_23"       ,              "Yards_Carry_18"         ,              
+  "Yards_Carry_19"           ,             "Yards_Carry_20"           ,             "Yards_Carry_21"          ,             
+  "Yards_Carry_22"            ,            "Yards_Carry_23"            ,            "Yards_TMRushAttempt_18"   ,            
+  "Yards_TMRushAttempt_19"     ,           "Yards_TMRushAttempt_20"     ,           "Yards_TMRushAttempt_21"    ,           
+  "Yards_TMRushAttempt_22"      ,          "Yards_TMRushAttempt_23"      ,          "TDs_TMRushAttempt_18"       ,          
+  "TDs_TMRushAttempt_19"         ,         "TDs_TMRushAttempt_20"         ,         "TDs_TMRushAttempt_21"        ,         
+  "TDs_TMRushAttempt_22"          ,        "TDs_TMRushAttempt_23"          ,        "Receptions_18"                ,        
+  "Receptions_19"                  ,       "Receptions_20"                  ,       "Receptions_21"                 ,       
+  "Receptions_22"  ,                       "Receptions_23"                   ,      "ReceivingYards_18"              ,      
+  "ReceivingYards_19",                     "ReceivingYards_20"                ,     "ReceivingYards_21" ,                   
+  "ReceivingYards_22" ,                    "ReceivingYards_23"                 ,    "ReceivingTDs_18"    ,                  
+  "ReceivingTDs_19"    ,                   "ReceivingTDs_20"                    ,   "ReceivingTDs_21"     ,                 
+  "ReceivingTDs_22"     ,                  "ReceivingTDs_23" ,                      "MSReceptions_18"      ,                
+ "MSReceptions_19"       ,                "MSReceptions_20"   ,                    "MSReceptions_21"        ,              
+  "MSReceptions_22"       ,                "MSReceptions_23"   ,                    "MSReceivingYards_18"    ,              
+ "MSReceivingYards_19"     ,              "MSReceivingYards_20" ,                  "MSReceivingYards_21"      ,            
+ "MSReceivingYards_22"      ,             "MSReceivingYards_23"  ,                 "MSReceivingTDs_18"         ,           
+ "MSReceivingTDs_19"         ,            "MSReceivingTDs_20"     ,                "MSReceivingTDs_21"          ,          
+ "MSReceivingTDs_22"          ,           "MSReceivingTDs_23"      ,               "CombinedRECMS_18"            ,         
+ "CombinedRECMS_19"            ,          "CombinedRECMS_20"        ,              "CombinedRECMS_21"             ,        
+ "CombinedRECMS_22"             ,         "CombinedRECMS_23"         ,             "TotalCombinedMS_18"            ,       
+ "TotalCombinedMS_19"            ,        "TotalCombinedMS_20"        ,            "TotalCombinedMS_21"             ,      
+ "TotalCombinedMS_22"             ,       "TotalCombinedMS_23"         ,           "Yards_Reception_18"              ,     
+ "Yards_Reception_19"              ,      "Yards_Reception_20"          ,          "Yards_Reception_21"               ,    
+"Yards_Reception_22"                ,    "Yards_Reception_23"            ,        "Yards_ReceptionOverTMAverage_18"    ,  
+ "Yards_ReceptionOverTMAverage_19"   ,    "Yards_ReceptionOverTMAverage_20" ,      "Yards_ReceptionOverTMAverage_21"  ,
+  "Touches_18",  "Touches_19" ,                           "Touches_20" ,                           "Touches_21"    ,                       
+ "Touches_22"         ,                   "Touches_23",                            "ScrimmageYards_18"  ,                  
+ "ScrimmageYards_19"  ,                   "ScrimmageYards_20" ,                    "ScrimmageYards_21" ,                   
+ "ScrimmageYards_22"   ,                  "ScrimmageYards_23"  ,                   "ScrimmageTDs_18"    ,                  
+ "ScrimmageTDs_19"      ,                 "ScrimmageTDs_20"     ,                  "ScrimmageTDs_21"     ,                 
+ "ScrimmageTDs_22"       ,                "ScrimmageTDs_23"      ,                 "TouchMS_18"           ,                
+ "TouchMS_19"             ,               "TouchMS_20"            ,                "TouchMS_21"            ,               
+ "TouchMS_22"              ,              "TouchMS_23"             ,               "ScrimmageYardsMS_18"    ,              
+ "ScrimmageYardsMS_19"      ,             "ScrimmageYardsMS_20"     ,              "ScrimmageYardsMS_21"     ,             
+ "ScrimmageYardsMS_22"       ,            "ScrimmageYardsMS_23"      ,             "ScrimmageTDsMS_18"        ,            
+ "ScrimmageTDsMS_19"          ,           "ScrimmageTDsMS_20"         ,            "ScrimmageTDsMS_21"         ,           
+ "ScrimmageTDsMS_22"           ,          "ScrimmageTDsMS_23"          ,           "CombineSCRIMMS_18"          ,          
+ "CombineSCRIMMS_19"            ,         "CombineSCRIMMS_20"           ,          "CombineSCRIMMS_21"           ,         
+ "CombineSCRIMMS_22"             ,        "CombineSCRIMMS_23"            ,         "ScrimmageYards_Touch_18"      ,        
+ "ScrimmageYards_Touch_19"        ,       "ScrimmageYards_Touch_20"       ,        "ScrimmageYards_Touch_21"       ,       
+ "ScrimmageYards_Touch_22"         ,      "ScrimmageYards_Touch_23"        ,       "ScrimYards_TouchOverTMAVG_18"   ,      
+ "ScrimYards_TouchOverTMAVG_19"     ,     "ScrimYards_TouchOverTMAVG_20"    ,      "ScrimYards_TouchOverTMAVG_21"    ,     
+ "ScrimYards_TouchOverTMAVG_22"      ,    "ScrimYards_TouchOverTMAVG_23"     ,     "Touch_Play_18"                    ,    
+ "Touch_Play_19"    ,                     "Touch_Play_20"                      ,   "Touch_Play_21"                     ,   
+ "Touch_Play_22"     ,                    "Touch_Play_23"   ,                      "ScrimmageYards_Play_18"             ,  
+"ScrimmageYards_Play_19",                "ScrimmageYards_Play_20" ,               "ScrimmageYards_Play_21"               ,
+ "ScrimmageYards_Play_22" ,               "ScrimmageYards_Play_23" ,               "ScrimmageTDs_Play_18"                 ,
+ "ScrimmageTDs_Play_19"    ,              "ScrimmageTDs_Play_20"    ,              "ScrimmageTDs_Play_21"                 ,
+ "ScrimmageTDs_Play_22"     ,             "ScrimmageTDs_Play_23"     ,             "PPRFantasyPoints_18"                  ,
+ "PPRFantasyPoints_19"       ,            "PPRFantasyPoints_20"       ,            "PPRFantasyPoints_21"                  ,
+ "PPRFantasyPoints_22"        ,           "PPRFantasyPoints_23",
+ "TotalTouches_19"             ,          "TotalTouches_20"     ,                  "TotalTouches_21" ,                     
+ "TotalTouches_22"              ,         "TotalTouches_23"      ,                 "TotalYards_18"    ,                    
+ "TotalYards_19"                 ,        "TotalYards_20"         ,                "TotalYards_21"     ,                   
+ "TotalYards_22"                  ,       "TotalYards_23"          ,               "TotalTDs_18"        ,                  
+ "TotalTDs_19"                     ,      "TotalTDs_20"             ,              "TotalTDs_21"         ,                 
+ "TotalTDs_22"                      ,     "TotalTDs_23" ,
+"Combine_Height" ,                       "Combine_Weight"  ,                      "Combine_HandSize" ,                    
+ "Combine_ArmLength"    ,                 "Combine_40time"   ,                     "Combine_Bench"  ,                      
+ "Combine_Vertical",                      "Combine_Broad"    ,                     "Combine_Shuttle"  ,                    
+ "Combine_3Cone",
+ "Yards_ReceptionOverTMAverage_22"    ,   "Yards_ReceptionOverTMAverage_23"       ,'TotalCareer_REC_GP', 'TotalCareer_RECYards', 'TotalCareer_RECYards_GP', 'TotalCareer_RECTDs', 'TotalCareer_RECTDs_GP', 'TotalCareer_Yards_REC', 'TotalCareer_Touches', 'TotalCareer_Touches_GP', 'TotalCareer_PPRPoints', 'TotalCareer_PPR_GP', 'TotalCareer_PPR_Touch', 'TotalCareer_TotalTouches_GP', 'TotalCareer_TotalYards', 'TotalCareer_TotalYards_GP', 'TotalCareer_TotalTDs', 'TotalCareer_TotalTDs_GP', 'CareerBest_REC', 'CareerBest_RECs_GP', 'CareerBest_RECYards', 'CareerBest_RECYards_GP', 'CareerBest_RECTDs', 'CareerBest_RECTDs_GP', 'CareerBest_RECMS', 'CareerBest_RECYardsMS', 'CareerBest_RECTDsMS', 'CareerBest_CombinedRECMS', 'CareerBest_TotalMS', 'CareerBest_Yards_REC', 'CareerBest_YDs_RECOverTMAVG', 'CareerBest_REC_TMPA', 'CareerBest_RECYards_TMPA', 'CareerBest_RECTDS_TMPA', 'CareerBest_Touches', 'CareerBest_Touches_GP', 'CareerBest_SCRIMYards', 'CareerBest_SCRIMYards_GP', 'CareerBest_SCRIMTDs', 'CareerBest_SCRIMTDs_GP', 'CareerBest_TouchMS', 'CareerBest_SCRIMYardsMS', 'CareerBest_SCRIMTDsMS', 'CareerBest_COMBSCRIMMS',  'CareerBest_SCRIMYards_Touch',  'CareerBest_SCRIMYDs_TouchOverTMAVG', 'CareerBest_Touch_Play', 'CareerBest_SCRIMYards_Play', 'CareerBest_SCRIMTDs_Play', 'CareerBest_PPRPoints', 'CareerBest_PPR_GP', 'CareerBest_PPR_Touch', 'CareerBest_TotalTouches',  'CareerBest_TotalTouches_GP', 'CareerBest_TotalYards', 'CareerBest_TotalYards_GP', 'CareerBest_TotalTDs',  'CareerBest_TotalTDs_GP', 'CareerLast_RECs_GP', 'CareerLast_RECYards', 'CareerLast_RECYards_GP', 'CareerLast_RECTDs', 'CareerLast_RECTDs_GP', 'CareerLast_RECMS', 'CareerLast_RECYardsMS',                 'CareerLast_RECTDsMS', 'CareerLast_CombinedRECMS', 'CareerLast_TotalMS', 'CareerLast_Yards_REC', 'CareerLast_YDs_RECOverTMAVG', 'CareerLast_REC_TMPA',             'CareerLast_RECYards_TMPA', 'CareerLast_RECTDS_TMPA', 'CareerLast_Touches', 'CareerLast_Touches_GP', 'CareerLast_SCRIMYards', 'CareerLast_SCRIMYards_GP',                 'CareerLast_SCRIMTDs', 'CareerLast_TotalTouches_GP', 'CareerLast_TotalYards', 'CareerLast_TotalYards_GP', 'CareerLast_TotalTDs', 'CareerAverage_RECYards',             'CareerAverage_RECYards_GP', 'CareerAverage_RECTDs', 'CareerAverage_RECTDs_GP', 'CareerAverage_RECMS', 'CareerAverage_RECYardsMS', 'CareerAverage_RECTDsMS',            'CareerAverage_CombinedRECMS', 'CareerAverage_TotalMS', 'CareerAverage_Yards_REC', 'CareerAverage_YDs_RECOverTMAVG', 'CareerAverage_REC_TMPA', 
+'CareerAverage_RECYards_TMPA', 'CareerAverage_RECTDS_TMPA', 'CareerAverage_Touches', 'CareerAverage_Touches_GP', 'CareerAverage_SCRIMYards',      'CareerAverage_SCRIMYards_GP','CareerAverage_SCRIMTDs', 'CareerAverage_SCRIMTDs_GP', 'CareerAverage_TouchMS', 'CareerAverage_SCRIMYardsMS', 'CareerAverage_SCRIMTDsMS',  'CareerAverage_COMBSCRIMMS', 'CareerAverage_SCRIMYards_Touch', 'CareerAverage_SCRIMYDs_TouchOverTMAVG', 'CareerAverage_Touch_Play', 'CareerAverage_SCRIMYards_Play',
+'CareerAverage_SCRIMTDs_Play', 'CareerAverage_PPRPoints', 'CareerAverage_PPR_GP', 'CareerAverage_PPR_Touch', 'CareerAverage_TotalTouches', 'CareerAverage_TotalTouches_GP', 'CareerAverage_TotalYards', 'CareerAverage_TotalYards_GP', 'CareerAverage_TotalTDs', 'CareerAverage_TotalTDs_GP', 'CollegeDominator_RECCD', 'CollegeDominator_SCRIMCD', 'Combine_BMI', 'Combine_Height', 'Combine_Weight', 'Combine_HaSS', 'B_O', 'PPG') %>% 
+  janitor::clean_names()
+
+wr_rookies <- rookies %>% 
+  select('Player','DraftYear','School', 'Conference', 'DR', 'DP', 'DraftAge',  'BreakoutAge_WRBOA_twentypercent','BreakoutAge_WRBOA_thirtypercent','TotalCareer_REC', 'GamesPlayed_18','GamesPlayed_19','GamesPlayed_20', 'GamesPlayed_21', 'GamesPlayed_22',  "RushATTs_18" ,                         
+ "RushATTs_19",                           "RushATTs_20" ,                         "RushATTs_21",                          
+  "RushATTs_22"  ,                         "RushATTs_23"  ,                         "RushYards_18" ,                        
+  "RushYards_19" ,                         "RushYards_20" ,                         "RushYards_21",                         
+  "RushYards_22"  ,                        "RushYards_23"  ,                        "RushTDs_18"   ,                        
+  "RushTDs_19"     ,                       "RushTDs_20"     ,                       "RushTDs_21"    ,                       
+  "RushTDs_22"      ,                      "RushTDs_23"      ,                      "MSRushATTs_18"  ,                      
+  "MSRushATTs_19"    ,                     "MSRushATTs_20"    ,                     "MSRushATTs_21"   ,                     
+  "MSRushATTs_22"     ,                    "MSRushATTs_23"     ,                    "MSRushYards_18"   ,                    
+  "MSRushYards_19"     ,                   "MSRushYards_20"     ,                   "MSRushYards_21"    ,                   
+  "MSRushYards_22"      ,                  "MSRushYards_23"      ,                  "MSRushTDs_18"       ,                  
+  "MSRushTDs_19"         ,                 "MSRushTDs_20"         ,                 "MSRushTDs_21"        ,                 
+  "MSRushTDs_22"          ,                "MSRushTDs_23"          ,                "CombinedRUSHMS_18"    ,                
+  "CombinedRUSHMS_19"      ,               "CombinedRUSHMS_20"      ,               "CombinedRUSHMS_21"     ,               
+  "CombinedRUSHMS_22"       ,              "CombinedRUSHMS_23"       ,              "Yards_Carry_18"         ,              
+  "Yards_Carry_19"           ,             "Yards_Carry_20"           ,             "Yards_Carry_21"          ,             
+  "Yards_Carry_22"            ,            "Yards_Carry_23"            ,            "Yards_TMRushAttempt_18"   ,            
+  "Yards_TMRushAttempt_19"     ,           "Yards_TMRushAttempt_20"     ,           "Yards_TMRushAttempt_21"    ,           
+  "Yards_TMRushAttempt_22"      ,          "Yards_TMRushAttempt_23"      ,          "TDs_TMRushAttempt_18"       ,          
+  "TDs_TMRushAttempt_19"         ,         "TDs_TMRushAttempt_20"         ,         "TDs_TMRushAttempt_21"        ,         
+  "TDs_TMRushAttempt_22"          ,        "TDs_TMRushAttempt_23"          ,        "Receptions_18"                ,        
+  "Receptions_19"                  ,       "Receptions_20"                  ,       "Receptions_21"                 ,       
+  "Receptions_22"  ,                       "Receptions_23"                   ,      "ReceivingYards_18"              ,      
+  "ReceivingYards_19",                     "ReceivingYards_20"                ,     "ReceivingYards_21" ,                   
+  "ReceivingYards_22" ,                    "ReceivingYards_23"                 ,    "ReceivingTDs_18"    ,                  
+  "ReceivingTDs_19"    ,                   "ReceivingTDs_20"                    ,   "ReceivingTDs_21"     ,                 
+  "ReceivingTDs_22"     ,                  "ReceivingTDs_23" ,                      "MSReceptions_18"      ,                
+ "MSReceptions_19"       ,                "MSReceptions_20"   ,                    "MSReceptions_21"        ,              
+  "MSReceptions_22"       ,                "MSReceptions_23"   ,                    "MSReceivingYards_18"    ,              
+ "MSReceivingYards_19"     ,              "MSReceivingYards_20" ,                  "MSReceivingYards_21"      ,            
+ "MSReceivingYards_22"      ,             "MSReceivingYards_23"  ,                 "MSReceivingTDs_18"         ,           
+ "MSReceivingTDs_19"         ,            "MSReceivingTDs_20"     ,                "MSReceivingTDs_21"          ,          
+ "MSReceivingTDs_22"          ,           "MSReceivingTDs_23"      ,               "CombinedRECMS_18"            ,         
+ "CombinedRECMS_19"            ,          "CombinedRECMS_20"        ,              "CombinedRECMS_21"             ,        
+ "CombinedRECMS_22"             ,         "CombinedRECMS_23"         ,             "TotalCombinedMS_18"            ,       
+ "TotalCombinedMS_19"            ,        "TotalCombinedMS_20"        ,            "TotalCombinedMS_21"             ,      
+ "TotalCombinedMS_22"             ,       "TotalCombinedMS_23"         ,           "Yards_Reception_18"              ,     
+ "Yards_Reception_19"              ,      "Yards_Reception_20"          ,          "Yards_Reception_21"               ,    
+"Yards_Reception_22"                ,    "Yards_Reception_23"            ,        "Yards_ReceptionOverTMAverage_18"    ,  
+ "Yards_ReceptionOverTMAverage_19"   ,    "Yards_ReceptionOverTMAverage_20" ,      "Yards_ReceptionOverTMAverage_21"  ,
+  "Touches_18",  "Touches_19" ,                           "Touches_20" ,                           "Touches_21"    ,                       
+ "Touches_22"         ,                   "Touches_23",                            "ScrimmageYards_18"  ,                  
+ "ScrimmageYards_19"  ,                   "ScrimmageYards_20" ,                    "ScrimmageYards_21" ,                   
+ "ScrimmageYards_22"   ,                  "ScrimmageYards_23"  ,                   "ScrimmageTDs_18"    ,                  
+ "ScrimmageTDs_19"      ,                 "ScrimmageTDs_20"     ,                  "ScrimmageTDs_21"     ,                 
+ "ScrimmageTDs_22"       ,                "ScrimmageTDs_23"      ,                 "TouchMS_18"           ,                
+ "TouchMS_19"             ,               "TouchMS_20"            ,                "TouchMS_21"            ,               
+ "TouchMS_22"              ,              "TouchMS_23"             ,               "ScrimmageYardsMS_18"    ,              
+ "ScrimmageYardsMS_19"      ,             "ScrimmageYardsMS_20"     ,              "ScrimmageYardsMS_21"     ,             
+ "ScrimmageYardsMS_22"       ,            "ScrimmageYardsMS_23"      ,             "ScrimmageTDsMS_18"        ,            
+ "ScrimmageTDsMS_19"          ,           "ScrimmageTDsMS_20"         ,            "ScrimmageTDsMS_21"         ,           
+ "ScrimmageTDsMS_22"           ,          "ScrimmageTDsMS_23"          ,           "CombineSCRIMMS_18"          ,          
+ "CombineSCRIMMS_19"            ,         "CombineSCRIMMS_20"           ,          "CombineSCRIMMS_21"           ,         
+ "CombineSCRIMMS_22"             ,        "CombineSCRIMMS_23"            ,         "ScrimmageYards_Touch_18"      ,        
+ "ScrimmageYards_Touch_19"        ,       "ScrimmageYards_Touch_20"       ,        "ScrimmageYards_Touch_21"       ,       
+ "ScrimmageYards_Touch_22"         ,      "ScrimmageYards_Touch_23"        ,       "ScrimYards_TouchOverTMAVG_18"   ,      
+ "ScrimYards_TouchOverTMAVG_19"     ,     "ScrimYards_TouchOverTMAVG_20"    ,      "ScrimYards_TouchOverTMAVG_21"    ,     
+ "ScrimYards_TouchOverTMAVG_22"      ,    "ScrimYards_TouchOverTMAVG_23"     ,     "Touch_Play_18"                    ,    
+ "Touch_Play_19"    ,                     "Touch_Play_20"                      ,   "Touch_Play_21"                     ,   
+ "Touch_Play_22"     ,                    "Touch_Play_23"   ,                      "ScrimmageYards_Play_18"             ,  
+"ScrimmageYards_Play_19",                "ScrimmageYards_Play_20" ,               "ScrimmageYards_Play_21"               ,
+ "ScrimmageYards_Play_22" ,               "ScrimmageYards_Play_23" ,               "ScrimmageTDs_Play_18"                 ,
+ "ScrimmageTDs_Play_19"    ,              "ScrimmageTDs_Play_20"    ,              "ScrimmageTDs_Play_21"                 ,
+ "ScrimmageTDs_Play_22"     ,             "ScrimmageTDs_Play_23"     ,             "PPRFantasyPoints_18"                  ,
+ "PPRFantasyPoints_19"       ,            "PPRFantasyPoints_20"       ,            "PPRFantasyPoints_21"                  ,
+ "PPRFantasyPoints_22"        ,           "PPRFantasyPoints_23",
+ "TotalTouches_19"             ,          "TotalTouches_20"     ,                  "TotalTouches_21" ,                     
+ "TotalTouches_22"              ,         "TotalTouches_23"      ,                 "TotalYards_18"    ,                    
+ "TotalYards_19"                 ,        "TotalYards_20"         ,                "TotalYards_21"     ,                   
+ "TotalYards_22"                  ,       "TotalYards_23"          ,               "TotalTDs_18"        ,                  
+ "TotalTDs_19"                     ,      "TotalTDs_20"             ,              "TotalTDs_21"         ,                 
+ "TotalTDs_22"                      ,     "TotalTDs_23" ,
+"Combine_Height" ,                       "Combine_Weight"  ,                      "Combine_HandSize" ,                    
+ "Combine_ArmLength"    ,                 "Combine_40time"   ,                     "Combine_Bench"  ,                      
+ "Combine_Vertical",                      "Combine_Broad"    ,                     "Combine_Shuttle"  ,                    
+ "Combine_3Cone",
+ "Yards_ReceptionOverTMAverage_22"    ,   "Yards_ReceptionOverTMAverage_23"       ,'TotalCareer_REC_GP', 'TotalCareer_RECYards', 'TotalCareer_RECYards_GP', 'TotalCareer_RECTDs', 'TotalCareer_RECTDs_GP', 'TotalCareer_Yards_REC', 'TotalCareer_Touches', 'TotalCareer_Touches_GP', 'TotalCareer_PPRPoints', 'TotalCareer_PPR_GP', 'TotalCareer_PPR_Touch', 'TotalCareer_TotalTouches_GP', 'TotalCareer_TotalYards', 'TotalCareer_TotalYards_GP', 'TotalCareer_TotalTDs', 'TotalCareer_TotalTDs_GP', 'CareerBest_REC', 'CareerBest_RECs_GP', 'CareerBest_RECYards', 'CareerBest_RECYards_GP', 'CareerBest_RECTDs', 'CareerBest_RECTDs_GP', 'CareerBest_RECMS', 'CareerBest_RECYardsMS', 'CareerBest_RECTDsMS', 'CareerBest_CombinedRECMS', 'CareerBest_TotalMS', 'CareerBest_Yards_REC', 'CareerBest_YDs_RECOverTMAVG', 'CareerBest_REC_TMPA', 'CareerBest_RECYards_TMPA', 'CareerBest_RECTDS_TMPA', 'CareerBest_Touches', 'CareerBest_Touches_GP', 'CareerBest_SCRIMYards', 'CareerBest_SCRIMYards_GP', 'CareerBest_SCRIMTDs', 'CareerBest_SCRIMTDs_GP', 'CareerBest_TouchMS', 'CareerBest_SCRIMYardsMS', 'CareerBest_SCRIMTDsMS', 'CareerBest_COMBSCRIMMS',  'CareerBest_SCRIMYards_Touch',  'CareerBest_SCRIMYDs_TouchOverTMAVG', 'CareerBest_Touch_Play', 'CareerBest_SCRIMYards_Play', 'CareerBest_SCRIMTDs_Play', 'CareerBest_PPRPoints', 'CareerBest_PPR_GP', 'CareerBest_PPR_Touch', 'CareerBest_TotalTouches',  'CareerBest_TotalTouches_GP', 'CareerBest_TotalYards', 'CareerBest_TotalYards_GP', 'CareerBest_TotalTDs',  'CareerBest_TotalTDs_GP', 'CareerLast_RECs_GP', 'CareerLast_RECYards', 'CareerLast_RECYards_GP', 'CareerLast_RECTDs', 'CareerLast_RECTDs_GP', 'CareerLast_RECMS', 'CareerLast_RECYardsMS',                 'CareerLast_RECTDsMS', 'CareerLast_CombinedRECMS', 'CareerLast_TotalMS', 'CareerLast_Yards_REC', 'CareerLast_YDs_RECOverTMAVG', 'CareerLast_REC_TMPA',             'CareerLast_RECYards_TMPA', 'CareerLast_RECTDS_TMPA', 'CareerLast_Touches', 'CareerLast_Touches_GP', 'CareerLast_SCRIMYards', 'CareerLast_SCRIMYards_GP',                 'CareerLast_SCRIMTDs', 'CareerLast_TotalTouches_GP', 'CareerLast_TotalYards', 'CareerLast_TotalYards_GP', 'CareerLast_TotalTDs', 'CareerAverage_RECYards',             'CareerAverage_RECYards_GP', 'CareerAverage_RECTDs', 'CareerAverage_RECTDs_GP', 'CareerAverage_RECMS', 'CareerAverage_RECYardsMS', 'CareerAverage_RECTDsMS',            'CareerAverage_CombinedRECMS', 'CareerAverage_TotalMS', 'CareerAverage_Yards_REC', 'CareerAverage_YDs_RECOverTMAVG', 'CareerAverage_REC_TMPA', 
+'CareerAverage_RECYards_TMPA', 'CareerAverage_RECTDS_TMPA', 'CareerAverage_Touches', 'CareerAverage_Touches_GP', 'CareerAverage_SCRIMYards',      'CareerAverage_SCRIMYards_GP','CareerAverage_SCRIMTDs', 'CareerAverage_SCRIMTDs_GP', 'CareerAverage_TouchMS', 'CareerAverage_SCRIMYardsMS', 'CareerAverage_SCRIMTDsMS',  'CareerAverage_COMBSCRIMMS', 'CareerAverage_SCRIMYards_Touch', 'CareerAverage_SCRIMYDs_TouchOverTMAVG', 'CareerAverage_Touch_Play', 'CareerAverage_SCRIMYards_Play',
+'CareerAverage_SCRIMTDs_Play', 'CareerAverage_PPRPoints', 'CareerAverage_PPR_GP', 'CareerAverage_PPR_Touch', 'CareerAverage_TotalTouches', 'CareerAverage_TotalTouches_GP', 'CareerAverage_TotalYards', 'CareerAverage_TotalYards_GP', 'CareerAverage_TotalTDs', 'CareerAverage_TotalTDs_GP', 'CollegeDominator_RECCD', 'CollegeDominator_SCRIMCD', 'Combine_BMI', 'Combine_Height', 'Combine_Weight', 'Combine_HaSS') %>% 
+  janitor::clean_names()
+```
+
+
+## Analysis - What Are the Most Predictive Factors of a Succesful Wide Receiver?
+
+
+#### Draft Pick is King
+
+This seems obvious but the most predictive attribute of a breakout wide receiver is draft position. NFL teams do a tremendous amount of research scouting these players and are generally decent at drafting the good ones early. This could also be biased as NFL teams are more inclined to give opportunity to players that they invested more heavily in.
+
+```{r}
+ggplot(ffb) +
+  aes(x = b_o , y = dp) + 
+  geom_boxplot() +
+  labs(title = "Draft Pick as a Predictor of WR Breakout") + 
+  xlab("") +
+  ylab("Draft Pick") + 
+  theme(
+     axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+     plot.title = element_text(hjust = 0.40)
+  ) 
+```
+
+Looking at the boxplots above, we can clearly see that wide receivers that breakout are most often taken earlier in the draft compared to those who do not breakout. 
+
+
+#### Draft Age
+
+This one is also pretty intuitive, wide receivers who declare for the draft as juniors are generally better prospects than those that stay in school for 4 years. 
+
+
+
+```{r}
+ggplot(ffb) +
+  aes(x = b_o, y = draft_age) + 
+  geom_boxplot() +
+  labs(title = "draft pick") + 
+  labs(title = "Draft Age as a Predictor of WR Breakout") + 
+  xlab("") +
+  ylab("Draft Age") + 
+  theme(
+     axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+     plot.title = element_text(hjust = 0.40)
+  ) 
+```
+
+The boxplots above show what intuitively makes sense; players who do well early in their college career and are drafted at a younger age, breakout more frequently than those who are drafted at an older age.
+
+
+
+#### Career Average Stats
+
+This metric normalizes average receiving yards while accounting for passing game volume differences. To elaborate, you have some teams that average 60 pass attempts per game while the college average is likely much closer to 30. This metric helps account for this nearly 60% difference in pass attempts. This can be thought of as a player's market share of his team's offense.
+
+
+From the visual below, we can see that players who consistently commanded a larger piece of their team's pie and did more on a per play/attempt basis not surprisingly had a better chance to breakout. This also proves that giving proper context to raw volume stats can prove quite valuable. 
+
+
+```{r fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+ggplot(ffb) +
+  aes(x = ppg  , y = career_average_rec_yards_tmpa, color = ppg) + 
+  geom_jitter() +
+  geom_smooth(method = lm, se = FALSE, color = "red") +
+  labs(title = "Career AVG Rec Yards Per Team Pass Attempt vs. Points Per Game") + 
+  xlab("PPG") +
+  ylab("Career AVG Receiving Yards (per TMPA)") + 
+  theme(
+    legend.position = "none",
+     axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+     plot.title = element_text(hjust = 0.40)
+   
+  )
+```
+
+While the relationship between this variable and points per game in the NFL is loose, there is still a relationship that can be seen and utilized by the model. 
+
+
+```{r}
+ffb <- ffb %>%   
+  filter(dr != 10) %>%
+  filter(ppg != 0) %>% 
+  filter(!is.na(ppg))
+wr_rookies <- wr_rookies %>%   
+  filter(dr != 10) 
+```
+
+
+Because the NFL draft doesn't start until April 29th, we don't actually know which teams will draft which players at this point. So we used the Pro Football Focus Mock Draft Simulator to simulate a mock NFL draft. We used the draft position and teams that drafted these players to take an educated guess at draft capital and opportunity for every player.
+
+
+## Setting up the model
+
+
+```{r}
+ffb <- ffb %>% 
+  mutate(
+  
+    combine_vertical = as.numeric(combine_vertical)
+ 
+         ) 
+wr_rookies <- wr_rookies %>% 
+  mutate(
+  
+    combine_vertical = as.numeric(combine_vertical)
+ 
+         ) 
+```
+
+
+
+```{r}
+ffb[is.na(ffb)] <- 0
+wr_rookies[is.na(wr_rookies)] <- 0
+```
+
+
+
+In order to utilize the KNN classifier to impute our missing values in the data set, we needed change any zeros in the columns below to NA's, so that they would be included in the classification. 
+
+```{r}
+ffb <- ffb %>%
+  mutate(combine_height = ifelse(combine_height == 0, NA, combine_height ), 
+         combine_weight = ifelse(combine_weight == 0, NA, combine_weight),
+         combine_hand_size = ifelse(combine_hand_size == 0, NA, combine_hand_size),
+         combine_arm_length = ifelse(combine_arm_length == 0, NA, combine_arm_length),
+         combine_40time = ifelse(combine_40time == 0, NA, combine_40time), 
+         combine_bench = ifelse(combine_bench == 0, NA, combine_bench), 
+         combine_vertical = ifelse(combine_vertical == 0, NA, combine_vertical), 
+         combine_broad = ifelse(combine_broad == 0, NA, combine_broad), 
+         combine_shuttle = ifelse(combine_shuttle == 0, NA, combine_shuttle), 
+         combine_3cone = ifelse(combine_3cone == 0, NA, combine_3cone),
+         combine_ha_ss = ifelse(combine_ha_ss == 0, NA, combine_ha_ss)
+         )
+wr_rookies <- wr_rookies %>%
+  mutate(combine_height = ifelse(combine_height == 0, NA, combine_height ), 
+         combine_weight = ifelse(combine_weight == 0, NA, combine_weight),
+         combine_hand_size = ifelse(combine_hand_size == 0, NA, combine_hand_size),
+         combine_arm_length = ifelse(combine_arm_length == 0, NA, combine_arm_length),
+         combine_40time = ifelse(combine_40time == 0, NA, combine_40time), 
+         combine_bench = ifelse(combine_bench == 0, NA, combine_bench), 
+         combine_vertical = ifelse(combine_vertical == 0, NA, combine_vertical), 
+         combine_broad = ifelse(combine_broad == 0, NA, combine_broad), 
+         combine_shuttle = ifelse(combine_shuttle == 0, NA, combine_shuttle), 
+         combine_3cone = ifelse(combine_3cone == 0, NA, combine_3cone),
+         combine_ha_ss = ifelse(combine_ha_ss == 0, NA, combine_ha_ss)
+         )
+```
+
+
+```{r, include=FALSE}
+cols <-names(ffb)
+col_names <- trimws(cols)
+col_names[make.names(cols) != col_names]
+
+
+cols1 <-names(wr_rookies)
+col_names1 <- trimws(cols1)
+col_names1[make.names(cols1) != col_names1]
+
+```
+
+Next, we remove the unneeded variables. 
+
+```{r}
+ffb <- ffb %>% select(-ppg, -draft_year)
+wr_rookies <- wr_rookies %>% select(-draft_year)
+```
+
+
+For this model, we chose to implement the random forest algorithm.
+
+```{r}
+cores <- parallel::detectCores()
+cores
+```
+
+Setting the importance = `impurity` will allow us to see which variables were most important to the model after the model has finished running. 
+
+```{r}
+set.seed(420)
+rf_mod <- 
+  rand_forest(mtry = 28, 
+              min_n = 32, 
+              trees = 1500) %>%
+  set_engine("ranger", num.threads = cores, importance = "impurity") %>%
+  set_mode("classification")
+rf_mod
+```
+
+Next we utilize tidymodels' recipe to create dummy variables, remove columns with a single variable, normalize the data, impute nulls in the data set, and up sample.
+
+
+```{r}
+rf_recipe <- 
+ recipe(b_o ~ ., data = ffb) %>%
+    update_role(player , new_role = "ID") %>%
+    step_dummy(all_nominal(), -all_outcomes()) %>%
+    step_zv(all_predictors()) %>%
+    step_normalize(all_predictors()) %>%
+    step_knnimpute(all_predictors()) %>%
+    themis::step_upsample(b_o, over_ratio = 1.0) 
+```
+
+```{r}
+rf_workflow <- 
+  workflow() %>%
+  add_model(rf_mod) %>%
+  add_recipe(rf_recipe)
+```
+
+```{r}
+wr_fit <- rf_workflow %>% 
+  fit(data = ffb)
+```
+
+Now, we will utilize our model to make predictions.
+
+```{r warning=FALSE, message=FALSE}
+wr_predictions <- predict(wr_fit, wr_rookies, type = "prob") %>%
+  bind_cols(wr_rookies %>% select(player))
+```
+
+
+
+## Which Wide Receivers Will Break Out?
+
+
+Below is the output for the model showing the top 30 rookie wide receivers with the highest probabilities to breakout: 
+
+```{r}
+top_30 <- wr_predictions %>% 
+  arrange(desc(.pred_Breakout)) %>%
+  top_n(30,.pred_Breakout)
+```
+
+
+```{r fig.height=8, fig.width=12, message=FALSE}
+ggplot(top_30) +
+  aes(x = reorder(player, .pred_Breakout), y = .pred_Breakout, fill = .pred_Breakout) + 
+  geom_col() +
+  geom_text(aes(label = round(.pred_Breakout,2)), hjust = -.2) +
+  scale_fill_gradient2(low = "lightblue",
+                       mid = "skyblue2",
+                       high = muted("blue4"),
+                       midpoint = .25)  +
+  labs(title = "Probability of Rookie Wide Receiver to Succeed") +
+  xlab("Player") +
+  ylab("Probability") +
+  coord_flip() + 
+   theme(
+    legend.position = "none",
+     axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+     plot.title = element_text(hjust = 0.40)
+   
+)
+
+ggsave("Breakout_Ratings21.png")
+```
+
+For example this graphic reads as Elijah Moore, our model's top receiver prospect, has a 61% chance to breakout and be successful in the NFL.
+
+We were surprised to not see the consensus top receiver prospect, Ja'Marr Chase, as the top receiver in the model. However, he is just slightly behind Elijah Moore and firmly in the top tier with a 59% chance to succeed.
+
+We were also surprised was how low the model is on DeVonta Smith. Smith is generally considered the 2nd best receiver in this class by experts but grades out as the 9th best receiver in our model. This is mainly due to his unicorn frame of 6 foot 170 pounds, a size at which very few NFL wide receiver have succeeded. Because of this frame, DeVonta Smith has one of the lowest BMI's the NFL has ever seen at the wide receiver position. BMI is one of the most predictive factors of wide receiver success in our model.
+
+The model is also relatively low on another projected top prospect, Kadarius Toney. Kadarius Toney is a very athletic wide receiver prospect who has been ranked as a top 5 wide receiver by many draft experts. However our model ranks him as the 24th best wide receiver in the class. This is due to Toney's lack of college production at an early age, a factor undervalued by many NFL teams.
+
+## Most predictive factors: 
+
+Below you will see the top 25 most important factors to the model: 
+
+```{r fig.height=6, fig.width=10}
+wr_fit %>% 
+    pull_workflow_fit() %>% 
+  vip(num_features = 25, color = "red", fill = 'blue') +
+  labs(title = "Top 25 Most Predictive Factors") + 
+   theme(
+    legend.position = "none",
+     axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+     plot.title = element_text(hjust = 0.35)
+   
+  )
+```
+
+Of all factors that predict a prospects chances of a breakout, there are two that far exceed the others; draft pick and draft round. As discussed previously, this is most likely due to the opportunity that earlier picks are given compared to their late round teammates. The earlier a pick is, the bigger investment it represents for the team. It is then logical that the team would give these players more of an opportunity. You wouldn't don't spend significant capital on something only to not use it right?
+
+Also notice how only two of the top 25 factors are athletic measurements( Combine_bmi and combine_ha_ss), this is a signal that athleticism is not very important at wide receiver. This is not something the NFL has caught on to though, as throughout the years they are consistently prone to reaching for athletic wide receivers early in the draft due to their perceived potential. A recent example was last year when Henry Ruggs, a tremendously athletic player with very little college production, was drafted as the top wide receiver in the class. So far Henry Ruggs has been a bust and an example that some NFL organizations are focused on the wrong details when evaluating wide receiver prospects.
+
+
+# Conclusion and Next Steps
+
+To conclude, the model does a great job at simplifying which prospects are most likely to succeed. Obviously, it isn't going to be perfect but it will identify which players are historically outliers and adjust accordingly. The most important factor in the model is clearly draft capital, followed by college production. We would recommend that NFL teams focus more on collegiate production than on athleticism when evaluating wide receiver prospects. Another big learning point from this model was the amount of inherent uncertainty in drafting any wide receiver prospect. NFL teams would be wise to consistently trade back in the draft and have more quantity of picks rather than quality of picks. Even the best receiver prospect in the class is only successful 6 times out of 10, NFL teams should not pretend like any receiver prospect is a sure thing.
+
+
+The next step for this model would be to try other modeling algorithms like xgboost. The basis for a model like this could also be applied to other positions to determine their probability at succeeding too.
+
+
